@@ -29,7 +29,13 @@ import type { ActiveTool, ModelKey, UpscalerModelKey } from "./types"
 
 const VALID_TOOLS: ActiveTool[] = ["remover", "upscaler", "colorizer"]
 const VALID_MODELS = Object.keys(MODELS) as ModelKey[]
-const APP_VERSION = "1.1.3"
+const APP_VERSION = "1.1.4"
+const LOW_MEMORY_FALLBACK_MODEL: ModelKey = "modnet_quantized"
+
+const isOutOfMemoryError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  return /bad_alloc|out of memory|memory allocation/i.test(message)
+}
 
 const getProcessingErrorMessage = (error: unknown) => {
   if (!(error instanceof Error) || !error.message) {
@@ -65,8 +71,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
   const [zoom, setZoom] = useState(1)
   const [showChangelog, setShowChangelog] = useState(false)
   const [activeTool, setActiveTool] = useState<ActiveTool>(initialTool)
-  const [selectedModel, setSelectedModel] =
-    useState<ModelKey>("ormbg_quantized")
+  const [selectedModel, setSelectedModel] = useState<ModelKey>(
+    LOW_MEMORY_FALLBACK_MODEL
+  )
   const [upscalerModel, setUpscalerModel] =
     useState<ModelKey>("swin2sr_quantized")
   const [colorizerModel, setColorizerModel] = useState<ModelKey>(
@@ -203,6 +210,40 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     [applyBgColor, bgColor]
   )
 
+  const runBackgroundRemoval = useCallback(
+    async (
+      imgEl: HTMLImageElement,
+      model: ModelKey,
+      onUpdate: (text: string, pct: number) => void,
+      quality: number
+    ) => {
+      try {
+        return {
+          blob: await onnx.runInference(imgEl, model, onUpdate, quality),
+          model,
+          usedFallback: false,
+        }
+      } catch (error) {
+        if (model === LOW_MEMORY_FALLBACK_MODEL || !isOutOfMemoryError(error)) {
+          throw error
+        }
+
+        onUpdate("Low memory — switching to lightweight MODNet…", 0)
+        return {
+          blob: await onnx.runInference(
+            imgEl,
+            LOW_MEMORY_FALLBACK_MODEL,
+            onUpdate,
+            quality
+          ),
+          model: LOW_MEMORY_FALLBACK_MODEL,
+          usedFallback: true,
+        }
+      }
+    },
+    [onnx]
+  )
+
   // Remove background
   const remove = useCallback(async () => {
     if (!queue.imageData) return
@@ -213,14 +254,19 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     try {
       const imgEl = await loadImage(queue.imageData)
       const quality = 0.85 // Use standard quality during processing
-      const rawBlob = await onnx.runInference(
+      const processed = await runBackgroundRemoval(
         imgEl,
         selectedModel,
         updateDialog,
         quality
       )
-      const blob = await maybeComposite(rawBlob)
+      const blob = await maybeComposite(processed.blob)
       const url = URL.createObjectURL(blob)
+
+      if (processed.usedFallback) {
+        setSelectedModel(processed.model)
+        pushUrl("remover", processed.model)
+      }
 
       queue.setResultsData((prev) => [
         ...prev.filter((r) => r.name !== queue.selectedImage),
@@ -232,7 +278,11 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
       sendGAEvent({ event: "remove-background", value: "success" })
       const elapsed = Math.floor((performance.now() - start) / 1000)
       const { toast } = await import("sonner")
-      toast.success(`🚀 Done in ${elapsed} s`)
+      toast.success(
+        processed.usedFallback
+          ? `🚀 Done in ${elapsed} s using lightweight MODNet`
+          : `🚀 Done in ${elapsed} s`
+      )
     } catch (err) {
       console.error("[remove]", err)
       onnx.setModelStatus("error")
@@ -245,13 +295,14 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     }
   }, [
     queue,
-    onnx,
     selectedModel,
     updateDialog,
     openDialog,
     closeDialog,
     maybeComposite,
     triggerDust,
+    runBackgroundRemoval,
+    pushUrl,
   ])
 
   // Batch process
@@ -260,6 +311,8 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
 
     const start = performance.now()
     let accumulated: { data: Blob; name: string }[] = []
+    let modelToUse = selectedModel
+    let usedFallback = false
 
     openDialog("Starting batch…")
 
@@ -273,9 +326,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
         const imgEl = await loadImage(URL.createObjectURL(file))
 
         const quality = 0.85 // Use standard quality during processing
-        const rawBlob = await onnx.runInference(
+        const processed = await runBackgroundRemoval(
           imgEl,
-          selectedModel,
+          modelToUse,
           (text, pct) => {
             updateDialog(
               `[${i + 1}/${queue.settings.length}] ${label} — ${text}`,
@@ -284,8 +337,10 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
           },
           quality
         )
+        modelToUse = processed.model
+        usedFallback ||= processed.usedFallback
 
-        const blob = await maybeComposite(rawBlob)
+        const blob = await maybeComposite(processed.blob)
         accumulated = [...accumulated, { data: blob, name: setting.name }]
         queue.setResultsData(accumulated)
         queue.setResultData(URL.createObjectURL(blob))
@@ -294,9 +349,18 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
         sendGAEvent({ event: "remove-background", value: "success" })
       }
 
+      if (usedFallback) {
+        setSelectedModel(modelToUse)
+        pushUrl("remover", modelToUse)
+      }
+
       const elapsed = Math.floor((performance.now() - start) / 1000)
       const { toast } = await import("sonner")
-      toast.success(`🚀 Batch done in ${elapsed} s`)
+      toast.success(
+        usedFallback
+          ? `🚀 Batch done in ${elapsed} s using lightweight MODNet`
+          : `🚀 Batch done in ${elapsed} s`
+      )
     } catch (err) {
       console.error("[process]", err)
       const { toast } = await import("sonner")
@@ -308,13 +372,14 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     }
   }, [
     queue,
-    onnx,
     selectedModel,
     updateDialog,
     openDialog,
     closeDialog,
     maybeComposite,
     triggerDust,
+    runBackgroundRemoval,
+    pushUrl,
   ])
 
   // Upscale
