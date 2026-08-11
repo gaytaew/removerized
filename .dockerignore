@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.pnp.*
+.yarn
+node_modules
+work
+outputs
+*.log
+.env*
+Dockerfile*
+compose*.yml
+PROJECT.md

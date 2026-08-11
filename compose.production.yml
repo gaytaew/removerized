@@ -1,0 +1,26 @@
+services:
+  removerized:
+    image: ${REMOVERIZED_IMAGE:?REMOVERIZED_IMAGE is required}
+    container_name: removerized
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${REMOVERIZED_PORT:-3333}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
