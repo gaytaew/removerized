@@ -3,6 +3,7 @@ import { withSerwist } from "@serwist/turbopack";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  output: "standalone",
   transpilePackages: ["onnxruntime-web"],
   images: {
     dangerouslyAllowSVG: true,

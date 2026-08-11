@@ -4,9 +4,12 @@
 node_modules
 .pnp
 .pnp.js
-yarn.lock
-.yarnrc.yml
+.pnp.*
 .yarn/
+
+# The dependency lock and linker mode are part of the reproducible build.
+!yarn.lock
+!.yarnrc.yml
 
 # testing
 coverage

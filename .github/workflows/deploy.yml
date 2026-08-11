@@ -1,0 +1,154 @@
+name: Build and deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: removerized-production
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/removerized
+  DEPLOY_PORT: "3333"
+
+jobs:
+  build:
+    name: Build container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            NEXT_PUBLIC_SITE_URL=http://${{ secrets.SERVER_HOST }}:${{ env.DEPLOY_PORT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to server
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      SERVER_HOST: ${{ secrets.SERVER_HOST }}
+      SERVER_USER: ${{ secrets.SERVER_USER }}
+      SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+      SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GHCR_USER: ${{ github.actor }}
+    steps:
+      - name: Check out deployment definition
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          test -n "$SERVER_HOST"
+          test -n "$SERVER_USER"
+          test -n "$SERVER_SSH_KEY"
+          test -n "$SERVER_KNOWN_HOSTS"
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SERVER_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SERVER_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Prepare server
+        shell: bash
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=30 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            "$SERVER_USER@$SERVER_HOST" \
+            'command -v docker >/dev/null && docker compose version && install -d -m 755 /opt/removerized'
+
+          scp -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=30 \
+            compose.production.yml \
+            "$SERVER_USER@$SERVER_HOST:/opt/removerized/compose.yml"
+
+      - name: Pull and start release
+        shell: bash
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SERVER_USER@$SERVER_HOST" \
+            "docker login ghcr.io --username '$GHCR_USER' --password-stdin"
+
+          set +e
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SERVER_USER@$SERVER_HOST" \
+            "cd /opt/removerized && REMOVERIZED_IMAGE='$IMAGE_NAME:${GITHUB_SHA}' REMOVERIZED_PORT='$DEPLOY_PORT' docker compose up -d --pull always --remove-orphans"
+          deploy_status=$?
+
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SERVER_USER@$SERVER_HOST" \
+            'docker logout ghcr.io >/dev/null 2>&1 || true'
+          set -e
+
+          if [ "$deploy_status" -ne 0 ]; then
+            exit "$deploy_status"
+          fi
+
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SERVER_USER@$SERVER_HOST" \
+            "if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then ufw allow '${DEPLOY_PORT}/tcp'; fi"
+
+      - name: Verify container health
+        shell: bash
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SERVER_USER@$SERVER_HOST" \
+            'for attempt in $(seq 1 45); do status=$(docker inspect --format "{{.State.Health.Status}}" removerized 2>/dev/null || true); if [ "$status" = healthy ]; then exit 0; fi; sleep 2; done; docker logs --tail 200 removerized; exit 1'
+
+      - name: Verify public endpoint
+        shell: bash
+        run: |
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --max-time 10 "http://${SERVER_HOST}:${DEPLOY_PORT}/" >/dev/null; then
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
