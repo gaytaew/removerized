@@ -5,8 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { sendGAEvent } from "@next/third-parties/google"
 
-import { EditorCanvas } from "./components/EditorCanvas"
 import { ChangelogDialog } from "./components/ChangelogDialog"
+import { EditorCanvas } from "./components/EditorCanvas"
 import { EditorProcessingDialog } from "./components/EditorProcessingDialog"
 import { EditorToolbar } from "./components/EditorToolbar"
 import { MobileRestriction } from "./components/MobileRestriction"
@@ -29,7 +29,19 @@ import type { ActiveTool, ModelKey, UpscalerModelKey } from "./types"
 
 const VALID_TOOLS: ActiveTool[] = ["remover", "upscaler", "colorizer"]
 const VALID_MODELS = Object.keys(MODELS) as ModelKey[]
-const APP_VERSION = "1.1.2"
+const APP_VERSION = "1.1.3"
+
+const getProcessingErrorMessage = (error: unknown) => {
+  if (!(error instanceof Error) || !error.message) {
+    return "Please retry. If it keeps failing, reload the page."
+  }
+
+  if (error.message === "Failed to fetch") {
+    return "The AI model could not be downloaded. Check your connection and retry."
+  }
+
+  return error.message.slice(0, 180)
+}
 
 interface EditorProps {
   initialTool?: ActiveTool
@@ -37,12 +49,15 @@ interface EditorProps {
 
 export const Editor = ({ initialTool = "remover" }: EditorProps) => {
   const ortRef = useRef<typeof import("onnxruntime-web") | null>(null)
+  const ortReadyRef = useRef<Promise<typeof import("onnxruntime-web")> | null>(
+    null
+  )
 
   const searchParams = useSearchParams()
   const router = useRouter()
 
   const queue = useImageQueue()
-  const onnx = useOnnxSession(ortRef)
+  const onnx = useOnnxSession(ortRef, ortReadyRef)
   const { dialog, openDialog, updateDialog, closeDialog } =
     useProcessingDialog()
 
@@ -52,9 +67,8 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
   const [activeTool, setActiveTool] = useState<ActiveTool>(initialTool)
   const [selectedModel, setSelectedModel] =
     useState<ModelKey>("ormbg_quantized")
-  const [upscalerModel, setUpscalerModel] = useState<ModelKey>(
-    "swin2sr_quantized"
-  )
+  const [upscalerModel, setUpscalerModel] =
+    useState<ModelKey>("swin2sr_quantized")
   const [colorizerModel, setColorizerModel] = useState<ModelKey>(
     "deoldify_artistic_quantized"
   )
@@ -70,14 +84,14 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
   useEffect(() => {
     let mounted = true
 
-    import("onnxruntime-web").then((ort) => {
-      if (!mounted) return
-
+    const ready = import("onnxruntime-web").then((ort) => {
       ort.env.wasm.wasmPaths = WASM_CDN_BASE
       ort.env.wasm.numThreads = 1
 
-      ortRef.current = ort
+      if (mounted) ortRef.current = ort
+      return ort
     })
+    ortReadyRef.current = ready
 
     return () => {
       mounted = false
@@ -108,8 +122,8 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
       activeTool === "remover"
         ? selectedModel
         : activeTool === "upscaler"
-          ? upscalerModel
-          : colorizerModel
+        ? upscalerModel
+        : colorizerModel
     isModelCached(currentModel)
       .then((cached) => onnx.setModelStatus(cached ? "ready" : "idle"))
       .catch(() => onnx.setModelStatus("idle"))
@@ -137,8 +151,8 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
         tool === "remover"
           ? selectedModel
           : tool === "upscaler"
-            ? upscalerModel
-            : colorizerModel
+          ? upscalerModel
+          : colorizerModel
       pushUrl(tool, model)
     },
     [selectedModel, upscalerModel, colorizerModel, pushUrl]
@@ -223,7 +237,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
       console.error("[remove]", err)
       onnx.setModelStatus("error")
       const { toast } = await import("sonner")
-      toast.error("Background removal failed.")
+      toast.error("Background removal failed.", {
+        description: getProcessingErrorMessage(err),
+      })
     } finally {
       closeDialog()
     }
@@ -284,7 +300,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     } catch (err) {
       console.error("[process]", err)
       const { toast } = await import("sonner")
-      toast.error("Batch processing failed.")
+      toast.error("Batch processing failed.", {
+        description: getProcessingErrorMessage(err),
+      })
     } finally {
       closeDialog()
     }
@@ -332,7 +350,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     } catch (err) {
       console.error("[upscale]", err)
       const { toast } = await import("sonner")
-      toast.error("Upscaling failed.")
+      toast.error("Upscaling failed.", {
+        description: getProcessingErrorMessage(err),
+      })
     } finally {
       closeDialog()
     }
@@ -368,7 +388,9 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
     } catch (err) {
       console.error("[colorize]", err)
       const { toast } = await import("sonner")
-      toast.error("Colorization failed.")
+      toast.error("Colorization failed.", {
+        description: getProcessingErrorMessage(err),
+      })
     } finally {
       closeDialog()
     }
@@ -388,7 +410,12 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
 
       const link = (globalThis as any).document.createElement("a")
       link.href = URL.createObjectURL(convertedBlob)
-      const ext = format === "image/webp" ? "webp" : format === "image/jpeg" ? "jpg" : "png"
+      const ext =
+        format === "image/webp"
+          ? "webp"
+          : format === "image/jpeg"
+          ? "jpg"
+          : "png"
       link.download = `removerized-upscaled-${Date.now()}.${ext}`
       link.click()
       return
@@ -406,7 +433,12 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
 
       const link = (globalThis as any).document.createElement("a")
       link.href = URL.createObjectURL(convertedBlob)
-      const ext = format === "image/webp" ? "webp" : format === "image/jpeg" ? "jpg" : "png"
+      const ext =
+        format === "image/webp"
+          ? "webp"
+          : format === "image/jpeg"
+          ? "jpg"
+          : "png"
       link.download = `removerized-colorized-${Date.now()}.${ext}`
       link.click()
       return
@@ -419,25 +451,41 @@ export const Editor = ({ initialTool = "remover" }: EditorProps) => {
       const quality = (setting?.quality ?? 80) / 100
 
       // Convert format
-      const convertedBlob = await convertImageFormat(result.data, format, quality)
+      const convertedBlob = await convertImageFormat(
+        result.data,
+        format,
+        quality
+      )
 
       const link = (globalThis as any).document.createElement("a")
       link.href = URL.createObjectURL(convertedBlob)
-      const ext = format === "image/webp" ? "webp" : format === "image/jpeg" ? "jpg" : "png"
+      const ext =
+        format === "image/webp"
+          ? "webp"
+          : format === "image/jpeg"
+          ? "jpg"
+          : "png"
 
       const nameWithoutExt = result.name.replace(/\.[^/.]+$/, "")
       link.download = `${nameWithoutExt}.${ext}`
       link.click()
     }
-  }, [activeTool, upscaledData, colorizedData, queue.resultsData, queue.settings, queue.selectedImage])
+  }, [
+    activeTool,
+    upscaledData,
+    colorizedData,
+    queue.resultsData,
+    queue.settings,
+    queue.selectedImage,
+  ])
 
   // Derived
   const canDownload =
     activeTool === "upscaler"
       ? !!upscaledData
       : activeTool === "colorizer"
-        ? !!colorizedData
-        : !!queue.resultsData.find((r) => r.name === queue.selectedImage)
+      ? !!colorizedData
+      : !!queue.resultsData.find((r) => r.name === queue.selectedImage)
 
   const accentColor = TOOL_ACCENTS[activeTool]
   const bgImage = queue.imageData || queue.resultData

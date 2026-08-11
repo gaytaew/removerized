@@ -3,6 +3,12 @@ import type { ModelKey } from "../types"
 
 const MODEL_FETCH_TIMEOUT_MS = 10 * 60 * 1000
 const MODEL_STALL_TIMEOUT_MS = 30 * 1000
+const MIN_MODEL_SIZE_BYTES = 1024 * 1024
+
+export interface ModelBufferResult {
+  buffer: ArrayBuffer
+  source: "cache" | "network"
+}
 
 /**
  * Opens (or creates) the IndexedDB database used to cache ONNX model buffers.
@@ -51,6 +57,34 @@ export const saveToIDB = (
     req.onerror = () => reject(req.error)
   })
 
+/** Removes one model cache entry without affecting the rest of the database. */
+export const deleteFromIDB = (db: IDBDatabase, key: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const req = db
+      .transaction(IDB_STORE, "readwrite")
+      .objectStore(IDB_STORE)
+      .delete(key)
+    req.onsuccess = () => resolve()
+    req.onerror = () => reject(req.error)
+  })
+
+const saveModelBestEffort = async (
+  db: IDBDatabase,
+  cacheKey: string,
+  buffer: ArrayBuffer
+) => {
+  try {
+    await saveToIDB(db, cacheKey, buffer)
+  } catch (error) {
+    // Caching is an optimization. A full browser storage quota must not make
+    // an otherwise valid, already downloaded model unusable.
+    console.warn(
+      "[model-cache] Unable to persist model; using it in memory",
+      error
+    )
+  }
+}
+
 /**
  * Returns `true` when the given model is already stored in IndexedDB.
  * Used to show the "Cached" status badge without a full download attempt.
@@ -58,7 +92,7 @@ export const saveToIDB = (
 export const isModelCached = async (modelKey: ModelKey): Promise<boolean> => {
   const db = await openModelDB()
   const buf = await getFromIDB(db, MODELS[modelKey].cacheKey)
-  return buf !== null
+  return buf !== null && buf.byteLength >= MIN_MODEL_SIZE_BYTES
 }
 
 /**
@@ -69,30 +103,49 @@ export const isModelCached = async (modelKey: ModelKey): Promise<boolean> => {
  *  2. If the model buffer already exists, return it immediately (cache hit).
  *  3. Otherwise stream-download from HuggingFace, reporting byte-level
  *     progress via `onProgress` (0–100).
- *  4. Assemble chunks into a single ArrayBuffer, persist to IndexedDB, then
- *     return the buffer.
+ *  4. Assemble chunks into a single ArrayBuffer, attempt to persist it, then
+ *     return the buffer even when the optional cache write is unavailable.
  *
  * @param modelKey   - Which model variant to fetch ("quantized" | "fp16").
  * @param onProgress - Called repeatedly with a percentage value (0–100).
- * @returns          - The raw ONNX model as an ArrayBuffer.
+ * @returns          - The raw ONNX model and whether it came from cache.
  */
 export const checkAndDownloadModel = async (
   modelKey: ModelKey,
-  onProgress: (pct: number) => void
-): Promise<ArrayBuffer> => {
+  onProgress: (pct: number) => void,
+  options: { forceRefresh?: boolean } = {}
+): Promise<ModelBufferResult> => {
   const { url, cacheKey } = MODELS[modelKey]
   const db = await openModelDB()
 
   // ── Cache hit ────────────────────────────────────────────────────────────
-  const cached = await getFromIDB(db, cacheKey)
-  if (cached) {
+  if (options.forceRefresh) {
+    await deleteFromIDB(db, cacheKey).catch((error) => {
+      console.warn("[model-cache] Unable to clear the cached model", error)
+    })
+  }
+
+  const cached = options.forceRefresh ? null : await getFromIDB(db, cacheKey)
+  if (cached && cached.byteLength >= MIN_MODEL_SIZE_BYTES) {
     onProgress(100)
-    return cached
+    return { buffer: cached, source: "cache" }
+  }
+
+  if (cached) {
+    await deleteFromIDB(db, cacheKey).catch((error) => {
+      console.warn(
+        "[model-cache] Unable to remove an invalid cache entry",
+        error
+      )
+    })
   }
 
   // ── Network fetch ────────────────────────────────────────────────────────
   const controller = new AbortController()
-  const fetchTimeoutId = setTimeout(() => controller.abort(), MODEL_FETCH_TIMEOUT_MS)
+  const fetchTimeoutId = setTimeout(
+    () => controller.abort(),
+    MODEL_FETCH_TIMEOUT_MS
+  )
 
   try {
     const res = await fetch(url, {
@@ -105,9 +158,9 @@ export const checkAndDownloadModel = async (
 
     if (!res.body) {
       const arrayBuffer = await res.arrayBuffer()
-      await saveToIDB(db, cacheKey, arrayBuffer)
+      await saveModelBestEffort(db, cacheKey, arrayBuffer)
       onProgress(100)
-      return arrayBuffer
+      return { buffer: arrayBuffer, source: "network" }
     }
 
     const total = parseInt(res.headers.get("Content-Length") ?? "0", 10)
@@ -123,7 +176,11 @@ export const checkAndDownloadModel = async (
           new Promise<never>((_, reject) => {
             timeoutId = setTimeout(
               () =>
-                reject(new Error("Model download stalled. Please check your connection.")),
+                reject(
+                  new Error(
+                    "Model download stalled. Please check your connection."
+                  )
+                ),
               MODEL_STALL_TIMEOUT_MS
             )
           }),
@@ -162,14 +219,16 @@ export const checkAndDownloadModel = async (
     const arrayBuffer = merged.buffer
 
     // ── Persist to cache ───────────────────────────────────────────────────
-    await saveToIDB(db, cacheKey, arrayBuffer)
+    await saveModelBestEffort(db, cacheKey, arrayBuffer)
     onProgress(100)
 
-    return arrayBuffer
+    return { buffer: arrayBuffer, source: "network" }
   } catch (err) {
     if ((err as Error).name === "AbortError") {
       throw new Error(
-        `Model download timed out after ${Math.round(MODEL_FETCH_TIMEOUT_MS / 1000)}s.`
+        `Model download timed out after ${Math.round(
+          MODEL_FETCH_TIMEOUT_MS / 1000
+        )}s.`
       )
     }
     throw err
