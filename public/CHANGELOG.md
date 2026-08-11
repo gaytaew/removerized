@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.1.3] - 2026-08-11
+
+### Fixed
+
+- Background removal no longer fails when the browser cannot save another copy of the downloaded AI model because its storage quota is full.
+- Invalid cached models are detected and downloaded again once automatically.
+- The editor waits for ONNX Runtime initialization instead of failing when processing is started immediately after page load.
+- AI models and ONNX Runtime files are no longer duplicated in the service worker cache; obsolete duplicates are removed during service worker activation.
+- Processing errors now include the underlying reason to make connection and runtime failures actionable.
+
+---
+
 ## [1.1.2] - 2025-03-24
 ### Added
 - 🎨 **Palette**: Added keyboard shortcuts and tooltip hints for core editor actions.
