@@ -179,7 +179,11 @@ export const useOnnxSession = (
       const session = await getOrCreateSession(modelKey, onUpdate)
 
       onUpdate("Pre-processing…", 0)
-      const inputTensor = preprocessImage(imgEl, ort)
+      const inputTensor = preprocessImage(
+        imgEl,
+        ort,
+        MODELS[modelKey].inferenceSize
+      )
 
       onUpdate("Running inference…", 0)
       const inputType = MODELS[modelKey].inputType

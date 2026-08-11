@@ -10,17 +10,21 @@ type Ort = typeof import("onnxruntime-web")
  * ONNX background-removal model.
  *
  * Steps:
- *  1. Draw the image onto an offscreen canvas resized to INFERENCE_SIZE².
+ *  1. Draw the image onto an offscreen canvas resized to the model input size.
  *  2. Read the raw RGBA pixel buffer.
  *  3. Convert each channel to float, apply ImageNet mean/std normalisation.
  *  4. Arrange the result in CHW order (channel-height-width) as required by
  *     PyTorch-exported ONNX models.
  *
  * @param imgEl - The source image element (can be any natural size).
- * @returns     - An ort.Tensor with dtype "float32" and shape [1, 3, 1024, 1024].
+ * @returns     - An ort.Tensor with dtype "float32" and shape [1, 3, S, S].
  */
-export const preprocessImage = (imgEl: any, ort: Ort) => {
-  const S = INFERENCE_SIZE
+export const preprocessImage = (
+  imgEl: any,
+  ort: Ort,
+  inferenceSize: number = INFERENCE_SIZE
+) => {
+  const S = inferenceSize
 
   const canvas = (globalThis as any).document.createElement("canvas")
   canvas.width = S
@@ -145,8 +149,11 @@ export const preprocessImageToImage = (
     useByteRange?: boolean
   } = {}
 ) => {
-  const { keepAspectRatio = false, grayscale = false, useByteRange = false } =
-    options
+  const {
+    keepAspectRatio = false,
+    grayscale = false,
+    useByteRange = false,
+  } = options
 
   let width = size
   let height = size
@@ -299,7 +306,7 @@ export const applyColorizerChromaToOriginal = (
     resizedColorCanvas.height = oh
     const resizedColorCtx = resizedColorCanvas.getContext("2d")!
     resizedColorCtx.imageSmoothingEnabled = true
-      ; (resizedColorCtx as any).imageSmoothingQuality = "high"
+    ;(resizedColorCtx as any).imageSmoothingQuality = "high"
     resizedColorCtx.drawImage(
       colorCanvas,
       cropX,

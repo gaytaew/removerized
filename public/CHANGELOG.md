@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.1.4] - 2026-08-11
+
+### Fixed
+
+- The default background-removal model is now low-memory MODNet at 512×512, so devices that cannot allocate enough WebAssembly memory for ORMBG can process images normally.
+- If a manually selected heavier model runs out of memory, background removal automatically retries once with MODNet and reports the switch.
+
+---
+
 ## [1.1.3] - 2026-08-11
 
 ### Fixed

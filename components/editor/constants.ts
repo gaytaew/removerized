@@ -14,6 +14,7 @@ export const MODELS: Record<
     author: string
     license: string
     inputType: string
+    inferenceSize?: number
   }
 > = {
   ormbg_quantized: {
@@ -75,7 +76,8 @@ export const MODELS: Record<
     cacheKey: "birefnet_lite_v1",
     label: "BiRefNet v2 Lite (FP32)",
     title: "BiRefNet v2 Lite — Bilateral Reference Image Segmentation",
-    description: "Standard precision without fidelity loss. Best when precision is more important than speed.",
+    description:
+      "Standard precision without fidelity loss. Best when precision is more important than speed.",
     size: "224 MB",
     author: "ONNX Community",
     license: "MIT",
@@ -88,7 +90,8 @@ export const MODELS: Record<
     cacheKey: "birefnet_lite_fp16_v2",
     label: "BiRefNet Lite (FP16)",
     title: "BiRefNet Lite — Bilateral Reference Image Segmentation",
-    description: "Half precision with 50% less memory usage. Faster inference on modern GPUs and mobile processors.",
+    description:
+      "Half precision with 50% less memory usage. Faster inference on modern GPUs and mobile processors.",
     size: "~115 MB",
     author: "ONNX Community",
     license: "MIT",
@@ -131,12 +134,15 @@ export const MODELS: Record<
     size: "~25 MB",
     author: "Xenova / ZHKKKe",
     license: "Apache-2.0",
-    inputType: "pixel_values",
+    inputType: "input",
+    // MODNet accepts dynamic shapes. 512² keeps WebAssembly memory use low.
+    inferenceSize: 512,
   },
   swin2sr_quantized: {
     tool: "upscaler",
     url: "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX/resolve/main/onnx/model_quantized.onnx",
-    hfUrl: "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX",
+    hfUrl:
+      "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX",
     cacheKey: "swin2sr_quantized_v1",
     label: "Swin2SR x4 (Quantized)",
     title: "Swin2SR — Image Super-Resolution",
@@ -149,7 +155,8 @@ export const MODELS: Record<
   swin2sr_fp16: {
     tool: "upscaler",
     url: "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX/resolve/main/onnx/model_fp16.onnx",
-    hfUrl: "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX",
+    hfUrl:
+      "https://huggingface.co/onnx-community/swin2SR-realworld-sr-x4-64-bsrgan-psnr-ONNX",
     cacheKey: "swin2sr_fp16_v1",
     label: "Swin2SR x4 (FP16)",
     title: "Swin2SR — Image Super-Resolution",
