@@ -97,7 +97,14 @@ jobs:
           archive_path="${base_dir}/incoming/removerized-${release_id}.tar.gz"
           release_dir="${base_dir}/releases/${release_id}"
           next_link="${base_dir}/.current-${release_id}"
-          previous_release="$(readlink -f "${base_dir}/current" 2>/dev/null || true)"
+          previous_release=""
+
+          if [ -L "${base_dir}/current" ]; then
+            resolved_release="$(readlink -f "${base_dir}/current" 2>/dev/null || true)"
+            if [ -n "$resolved_release" ] && [ -d "$resolved_release" ] && [ "$resolved_release" != "${base_dir}/current" ]; then
+              previous_release="$resolved_release"
+            fi
+          fi
 
           install -d -o www-data -g www-data -m 755 "$release_dir"
           tar -xzf "$archive_path" -C "$release_dir"

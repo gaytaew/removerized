@@ -12,7 +12,7 @@ Environment=NODE_ENV=production
 Environment=PORT=3333
 Environment=HOSTNAME=127.0.0.1
 Environment=NEXT_TELEMETRY_DISABLED=1
-ExecStart=/usr/bin/node server.js
+ExecStart=/usr/local/bin/node22 server.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
