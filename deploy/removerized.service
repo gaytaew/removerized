@@ -1,0 +1,26 @@
+[Unit]
+Description=Removerized Next.js application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/removerized/current
+Environment=NODE_ENV=production
+Environment=PORT=3333
+Environment=HOSTNAME=127.0.0.1
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
