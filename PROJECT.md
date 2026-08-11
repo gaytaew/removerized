@@ -2,14 +2,14 @@
 
 ## Цель
 
-Развернуть на сервере пользователя собственный экземпляр Removerized — браузерного AI‑редактора изображений из upstream‑репозитория `yossdotpro/removerized` — и обеспечить автоматическое обновление сервера после каждого push в `main` пользовательского форка.
+Развернуть на актуальном сервере пользователя собственный экземпляр Removerized — браузерного AI‑редактора изображений из upstream‑репозитория `yossdotpro/removerized` — и обеспечить безопасный автоматический деплой после каждого push в `main` пользовательского форка.
 
 ## Репозитории и ветки
 
 - Upstream: `https://github.com/yossdotpro/removerized`.
 - Пользовательский форк: `https://github.com/gaytaew/removerized`.
-- Основная ветка и источник production‑деплоя: `main`.
-- Зафиксированная на момент начала работ upstream‑ревизия: `d9c291f` (`feat: add adsterra popunder`).
+- Production‑ветка: `main`.
+- Исходная upstream‑ревизия: `d9c291f` (`feat: add adsterra popunder`).
 - Лицензия: GNU GPL v3. При распространении модифицированной версии необходимо сохранять условия GPL и доступность исходного кода.
 
 ## Что делает приложение
@@ -32,9 +32,10 @@ Removerized — Next.js PWA, которая выполняет AI‑обрабо
 - Модели загружаются браузером с `huggingface.co`.
 - WASM‑файлы ONNX Runtime загружаются с `cdn.jsdelivr.net`.
 - В upstream включены Google Analytics, Vercel Analytics/Speed Insights и рекламные скрипты Adsterra/High Performance Format. Это поведение исходного приложения сохранено; перед публичным коммерческим запуском следует отдельно решить, нужно ли его отключать.
-- Секретные серверные данные в исходники не записываются.
+- Production‑зависимости Next.js, `@next/third-parties` и Sharp обновлены до исправленных версий 16.3.0/0.35.3. Повторный production audit не выявил security advisory; осталась только запись о deprecated транзитивном `whatwg-encoding`.
+- Секретные серверные данные не записываются в git.
 
-## Локальная разработка и проверка
+## Локальная разработка
 
 Требуется Node.js 22.11+ и Corepack:
 
@@ -44,77 +45,83 @@ corepack yarn build
 corepack yarn start
 ```
 
-Версии зависимостей фиксируются в `yarn.lock`. `.yarnrc.yml` включает обычный `node_modules` linker, чтобы локальная среда и Docker собирались одинаково.
+Версии зависимостей фиксируются в `yarn.lock`. `.yarnrc.yml` включает `node_modules` linker. `next.config.mjs` включает `standalone` output для автономного production‑релиза.
 
-## Production‑контейнер
+## Актуальный сервер
 
-- `Dockerfile` использует multi-stage сборку на Node.js 22 Alpine.
-- Next.js работает в `standalone`‑режиме.
-- Runtime запускается от непривилегированного пользователя `nextjs`.
-- Контейнер слушает порт `3000`.
-- `compose.production.yml` публикует его на серверном порту `3333`, включает автоматический рестарт, healthcheck, `no-new-privileges` и удаляет Linux capabilities.
-- Имя production‑контейнера: `removerized`.
-- Серверный каталог: `/opt/removerized`.
+- IP: `77.110.115.65`.
+- Hostname: `acute-bronze.ptr.network`.
+- ОС: Ubuntu 24.04.1 LTS, x86_64.
+- Node.js: 22.22.2 (`/usr/bin/node`).
+- Reverse proxy: Nginx 1.24.
+- Docker отсутствует и не устанавливается: корневой диск заполнен на 88%, а сервер уже использует systemd‑сервисы. Это исключает лишний daemon, слои образов и риск изменения существующей инфраструктуры.
+- Removerized слушает только loopback `127.0.0.1:3333`; порт не публикуется напрямую.
+- Публичный URL: `https://removerized.77-110-115-65.sslip.io:8443/`.
+- HTTPS использует отдельный sslip.io hostname и отдельный Nginx vhost на уже используемом HTTPS‑порту 8443. Существующие vhost, порт 80 для IP, stream‑маршрутизация 443 и приложения не заменяются.
+
+## Production‑файлы на сервере
+
+- База: `/opt/removerized`.
+- Immutable‑релизы: `/opt/removerized/releases/<commit>-<run-id>`.
+- Входящие архивы: `/opt/removerized/incoming`.
+- Активный релиз: атомарная ссылка `/opt/removerized/current`.
+- systemd unit: `/etc/systemd/system/removerized.service`.
+- Nginx vhost: `/etc/nginx/sites-available/removerized` и ссылка в `sites-enabled`.
+- TLS‑сертификат: `/etc/letsencrypt/live/removerized.77-110-115-65.sslip.io/`.
+
+Сервис работает от `www-data`, автоматически перезапускается при сбое, имеет `NoNewPrivileges`, отдельный `/tmp`, закрытый home и read-only системные каталоги.
 
 ## CI/CD и автодеплой
 
-Workflow `.github/workflows/deploy.yml` запускается при каждом push в `main` и вручную через `workflow_dispatch`:
+Workflow `.github/workflows/deploy.yml` запускается при каждом push в `main` и через `workflow_dispatch`:
 
-1. Собирает Docker‑образ с canonical URL сервера.
-2. Публикует теги `latest` и SHA коммита в GitHub Container Registry.
-3. Подключается к серверу по SSH с обязательной проверкой заранее сохранённого host key.
-4. Копирует production Compose‑файл в `/opt/removerized/compose.yml`.
-5. Запускает ровно тот immutable‑образ, который соответствует SHA текущего коммита.
-6. При активном UFW открывает TCP‑порт `3333`.
-7. Ждёт статуса `healthy` и проверяет публичный HTTP endpoint.
+1. Устанавливает зависимости строго по `yarn.lock`.
+2. Собирает Next.js с правильным `NEXT_PUBLIC_SITE_URL`.
+3. Формирует standalone‑архив без исходников и dev‑зависимостей.
+4. Загружает архив по SSH с обязательной проверкой закреплённого host key.
+5. Распаковывает новый immutable‑релиз, меняет `current` атомарно и перезапускает только `removerized.service`.
+6. Проверяет loopback health endpoint. При ошибке возвращает предыдущую ссылку `current` и перезапускает предыдущий релиз.
+7. Проверяет публичный HTTPS endpoint.
 
-GitHub Actions закреплены на полных commit SHA, чтобы изменение стороннего action‑тега не могло незаметно поменять код pipeline.
+GitHub Actions закреплены на полных commit SHA. Pipeline не перезапускает Nginx, чужие сервисы или сервер.
 
 ### GitHub Secrets
 
-- `SERVER_HOST` — IP или DNS‑имя сервера.
-- `SERVER_USER` — SSH‑пользователь.
+- `SERVER_HOST` — `77.110.115.65`.
+- `SERVER_USER` — SSH‑пользователь `root`.
 - `SERVER_SSH_KEY` — приватный deploy‑ключ.
 - `SERVER_KNOWN_HOSTS` — доверенная строка OpenSSH known_hosts.
 
-Значения секретов нельзя добавлять в этот файл, логи или git.
+Значения ключей нельзя добавлять в этот файл, логи или git.
 
-## Сервер и сетевой доступ
+## Безопасное обслуживание
 
-- Выбран хост SSH `do-mix`, так как второй доступный alias `agent-node` обозначает служебный узел агента.
-- Production endpoint без домена: `http://167.172.178.107:3333/`.
-- На момент подготовки локальное соединение с обоими SSH‑хостами закрывалось удалённой стороной до key exchange. Поэтому первый реальный деплой выполняется с GitHub‑hosted runner; его результат является окончательной проверкой серверного доступа.
-- Для HTTPS нужен домен, DNS A/AAAA запись и reverse proxy (Caddy/Nginx/Traefik). Это отдельный следующий шаг, потому что доменное имя пользователем пока не задано.
-
-## Операции
-
-Проверка контейнера на сервере:
+Проверка приложения:
 
 ```bash
-docker ps --filter name=removerized
-docker inspect --format '{{.State.Health.Status}}' removerized
-docker logs --tail 200 removerized
+systemctl status removerized.service --no-pager
+journalctl -u removerized.service -n 200 --no-pager
+curl -I http://127.0.0.1:3333/
+curl -I https://removerized.77-110-115-65.sslip.io:8443/
 ```
 
-Ручной перезапуск текущего образа:
+Проверка Nginx перед любым reload:
 
 ```bash
-cd /opt/removerized
-docker compose up -d --pull always
+nginx -t
 ```
 
-Откат выполняется заменой `REMOVERIZED_IMAGE` на существующий тег SHA в команде Compose. SHA‑теги не перезаписываются.
+Откат выполняется переключением `/opt/removerized/current` на существующий каталог из `releases` и перезапуском только `removerized.service`. Старые релизы автоматически не удаляются, чтобы не выполнять рискованное удаление на заполненном рабочем сервере; объём нужно периодически контролировать вручную.
 
 ## История изменений
 
 ### 2026-08-11
 
-- Клонирован и проверен upstream `d9c291f`.
-- Создан пользовательский форк `gaytaew/removerized`.
-- Успешно выполнена локальная production‑сборка Next.js.
-- Добавлена воспроизводимая Yarn‑конфигурация и lock‑файл.
-- Добавлена standalone Docker‑сборка и production Compose.
-- Добавлен GitHub Actions pipeline сборки, публикации в GHCR, автодеплоя и health‑проверки.
-- Production‑зависимости Next.js, `@next/third-parties` и Sharp обновлены до исправленных актуальных версий 16.3.0/0.35.3 после обнаружения high‑severity advisory в upstream‑версиях.
-- Повторный production dependency audit после обновления не выявил security advisory; осталась только moderate‑запись о deprecated транзитивном `whatwg-encoding`.
-- Зафиксирован текущий SSH‑блокер и выбран безопасный путь первого деплоя через GitHub Actions.
+- Клонирован upstream `d9c291f`, создан форк `gaytaew/removerized`.
+- Добавлены lock‑файл и воспроизводимая standalone‑сборка.
+- Исправлены актуальные high‑severity advisory обновлением Next.js и Sharp.
+- Первоначально найденные SSH alias указывали на старые DigitalOcean‑хосты; первый Docker pipeline собрал образ, но не смог подключиться. На этих хостах ничего не было изменено.
+- Пользователь указал актуальный сервер `77.110.115.65`; SSH‑доступ подтверждён.
+- Выполнена read-only инвентаризация. Обнаружены существующие Nginx, PostgreSQL, Node.js/systemd‑сервисы, занятые порты 80/443/8443/3000/4000/9090/3100 и 88% заполнения диска.
+- Docker‑деплой заменён на лёгкие standalone‑релизы под systemd, чтобы не затрагивать существующую инфраструктуру.
+- Добавлены изолированные systemd/Nginx конфигурации, HTTPS на отдельном sslip.io hostname и автодеплой с healthcheck/rollback.

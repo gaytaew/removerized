@@ -8,61 +8,51 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: removerized-production
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/removerized
-  DEPLOY_PORT: "3333"
+  SITE_URL: https://removerized.77-110-115-65.sslip.io:8443
 
 jobs:
-  build:
-    name: Build container
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
-          build-args: |
-            NEXT_PUBLIC_SITE_URL=http://${{ secrets.SERVER_HOST }}:${{ env.DEPLOY_PORT }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   deploy:
-    name: Deploy to server
-    needs: build
+    name: Build and deploy release
     runs-on: ubuntu-latest
     env:
       SERVER_HOST: ${{ secrets.SERVER_HOST }}
       SERVER_USER: ${{ secrets.SERVER_USER }}
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
       SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
-      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GHCR_USER: ${{ github.actor }}
     steps:
-      - name: Check out deployment definition
+      - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: yarn
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Build standalone application
+        shell: bash
+        run: NEXT_PUBLIC_SITE_URL="$SITE_URL" yarn build
+
+      - name: Package release
+        shell: bash
+        run: |
+          mkdir -p .release/.next
+          cp -R .next/standalone/. .release/
+          cp -R .next/static .release/.next/static
+          cp -R public .release/public
+          tar -czf "removerized-${GITHUB_SHA}-${GITHUB_RUN_ID}.tar.gz" -C .release .
 
       - name: Validate deployment configuration
         shell: bash
@@ -80,73 +70,72 @@ jobs:
           printf '%s\n' "$SERVER_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 
-      - name: Prepare server
+      - name: Upload release
         shell: bash
         run: |
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=30 \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=4 \
-            "$SERVER_USER@$SERVER_HOST" \
-            'command -v docker >/dev/null && docker compose version && install -d -m 755 /opt/removerized'
-
           scp -i "$HOME/.ssh/id_ed25519" \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=30 \
-            compose.production.yml \
-            "$SERVER_USER@$SERVER_HOST:/opt/removerized/compose.yml"
+            "removerized-${GITHUB_SHA}-${GITHUB_RUN_ID}.tar.gz" \
+            "$SERVER_USER@$SERVER_HOST:/opt/removerized/incoming/"
 
-      - name: Pull and start release
+      - name: Activate release with rollback
         shell: bash
         run: |
-          printf '%s' "$GHCR_TOKEN" | ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$SERVER_USER@$SERVER_HOST" \
-            "docker login ghcr.io --username '$GHCR_USER' --password-stdin"
-
-          set +e
           ssh -i "$HOME/.ssh/id_ed25519" \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=30 \
             "$SERVER_USER@$SERVER_HOST" \
-            "cd /opt/removerized && REMOVERIZED_IMAGE='$IMAGE_NAME:${GITHUB_SHA}' REMOVERIZED_PORT='$DEPLOY_PORT' docker compose up -d --pull always --remove-orphans"
-          deploy_status=$?
+            "bash -s -- '$GITHUB_SHA' '$GITHUB_RUN_ID'" <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
 
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$SERVER_USER@$SERVER_HOST" \
-            'docker logout ghcr.io >/dev/null 2>&1 || true'
-          set -e
+          release_sha="$1"
+          run_id="$2"
+          base_dir=/opt/removerized
+          release_id="${release_sha}-${run_id}"
+          archive_path="${base_dir}/incoming/removerized-${release_id}.tar.gz"
+          release_dir="${base_dir}/releases/${release_id}"
+          next_link="${base_dir}/.current-${release_id}"
+          previous_release="$(readlink -f "${base_dir}/current" 2>/dev/null || true)"
 
-          if [ "$deploy_status" -ne 0 ]; then
-            exit "$deploy_status"
+          install -d -o www-data -g www-data -m 755 "$release_dir"
+          tar -xzf "$archive_path" -C "$release_dir"
+          chown -R www-data:www-data "$release_dir"
+
+          ln -s "$release_dir" "$next_link"
+          mv -Tf "$next_link" "${base_dir}/current"
+          systemctl restart removerized.service
+
+          healthy=false
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3333/ >/dev/null; then
+              healthy=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" != true ]; then
+            journalctl -u removerized.service -n 200 --no-pager
+            if [ -n "$previous_release" ] && [ -d "$previous_release" ]; then
+              rollback_link="${base_dir}/.rollback-${release_id}"
+              ln -s "$previous_release" "$rollback_link"
+              mv -Tf "$rollback_link" "${base_dir}/current"
+              systemctl restart removerized.service
+            fi
+            exit 1
           fi
 
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$SERVER_USER@$SERVER_HOST" \
-            "if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then ufw allow '${DEPLOY_PORT}/tcp'; fi"
-
-      - name: Verify container health
-        shell: bash
-        run: |
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$SERVER_USER@$SERVER_HOST" \
-            'for attempt in $(seq 1 45); do status=$(docker inspect --format "{{.State.Health.Status}}" removerized 2>/dev/null || true); if [ "$status" = healthy ]; then exit 0; fi; sleep 2; done; docker logs --tail 200 removerized; exit 1'
+          rm -f "$archive_path"
+          REMOTE_SCRIPT
 
       - name: Verify public endpoint
         shell: bash
         run: |
           for attempt in $(seq 1 20); do
-            if curl --fail --silent --show-error --max-time 10 "http://${SERVER_HOST}:${DEPLOY_PORT}/" >/dev/null; then
+            if curl --fail --silent --show-error --max-time 10 "$SITE_URL/" >/dev/null; then
               exit 0
             fi
             sleep 3
